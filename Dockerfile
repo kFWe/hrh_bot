@@ -31,7 +31,7 @@ RUN apt-get update && apt-get install -y \
     cmake
 
 # GDB dependencies
-RUN apt-get install -y \
+RUN apt-get update && apt-get install -y \
     libncurses5 \
     libncurses5-dev \
     libncursesw5 \
@@ -43,7 +43,7 @@ RUN apt-get install -y \
     expat
 
 # JLINK gui dependencies
-RUN apt-get install -y \
+RUN apt-get update && apt-get install -y \
     libxrandr-dev \
     libxfixes-dev \
     libxcursor-dev
