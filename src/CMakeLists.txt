@@ -9,7 +9,7 @@ pico_add_extra_outputs(${CMAKE_PROJECT_NAME})
 target_compile_options(${CMAKE_PROJECT_NAME} PRIVATE -O0 -g3)
 target_link_libraries(
   ${CMAKE_PROJECT_NAME} PRIVATE pico_stdlib hardware_timer hardware_clocks
-                                hardware_pwm segger_systemview)
+                                hardware_pwm segger_systemview hardware_pio)
 
 target_include_directories(${CMAKE_PROJECT_NAME} PUBLIC 
   ${CMAKE_CURRENT_SOURCE_DIR}
