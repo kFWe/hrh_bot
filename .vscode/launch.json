@@ -35,7 +35,6 @@
             "runToEntryPoint": "main",
             "serverArgs": [
                 "-nogui",
-                
             ],
             "rttConfig": {
                 "enabled": true,

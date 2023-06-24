@@ -9,6 +9,8 @@
 #include "hardware/structs/systick.h"
 #include "pico/stdlib.h"
 #include "quadrature.pio.h"
+#include "PwmIn.pio.h"
+#include <float.h>
 
 #define LED_PIN PICO_DEFAULT_LED_PIN
 void init_systick();
@@ -17,30 +19,55 @@ void init_systick();
 #define QUADRATURE_A_PIN 14
 #define QUADRATURE_B_PIN 15
 PIO pio_;
-uint sm_ = 0u;
+uint sm_ = 1u;
+
+// RC Var
+#define RC_CH1_PIN 13
+#define RC_CH2_PIN 12
+PIO rcPio_;
+uint rcsm_ = 0u;
+float rc_period_ch1 = 0.0f; // in s
+float rc_pulseWidth_ch1 = 0.0f; // in s
+float rc_dutyCycle_ch1 = 0.0f;
+float rc_period_ch2 = 0.0f; // in s
+float rc_pulseWidth_ch2 = 0.0f; // in s
+float rc_dutyCycle_ch2 = 0.0f;
+float rc_readCh1(void);
+float rc_readCh2(void);
+
+// data about the PWM input measured in pio clock cycles
+static uint32_t pulsewidth[4], period[4];
 
 // Motor Vars
 #define POS_SPEED_BUTTON_PIN 2
 #define NEG_SPEED_BUTTON_PIN 3
-#define MOTOR_PWM 18
-#define MOTOR_IN1 17
-#define MOTOR_IN2 16
+#define LEFT_MOTOR_PWM 18
+#define LEFT_MOTOR_IN1 17
+#define LEFT_MOTOR_IN2 16
+#define RIGHT_MOTOR_PWM 21
+#define RIGHT_MOTOR_IN1 20
+#define RIGHT_MOTOR_IN2 19
 #define DEBOUNCE_TIME 200000u  // ms
 
 typedef enum Direction
 {
-    LEFT,
-    RIGHT
+    FORWARD,
+    BACKWARD
 } Direction;
-uint32_t currentMotorSpeed_ = 0u;  // rpm
+uint32_t currentMotorSpeedLeft_ = 0u;  // pwm
+uint32_t currentMotorSpeedRight_ = 0u;  // pwm
 uint32_t targetMotorSpeed_ = 0u;
 uint32_t currentMotorPosition_ = 0u;
 uint32_t targetMotorPosition_ = 0u;
-Direction currentMotorDirection_ = LEFT;
-Direction targetMotorDirection_ = LEFT;
+Direction currentMotorDirectionLeft_ = FORWARD;
+Direction targetMotorDirectionLeft_ = FORWARD;
+Direction currentMotorDirectionRight_ = FORWARD;
+Direction targetMotorDirectionRight_ = FORWARD;
 
-void setSpeed(uint8_t dutyCycle);
-void setDirection(Direction motorDirection);
+void setSpeedLeft(uint8_t dutyCycle);
+void setDirectionLeft(Direction motorDirection);
+void setSpeedRight(uint8_t dutyCycle);
+void setDirectionRight(Direction motorDirection);
 
 // Controller Vars
 uint32_t prevT = 0u;
@@ -57,6 +84,8 @@ extern void isr_systick()
 
     pio_sm_exec_wait_blocking(pio_, sm_, pio_encode_in(pio_x, 32));
     currentMotorPosition_ = pio_sm_get_blocking(pio_, sm_);
+    rc_readCh1();
+    rc_readCh2();
     SEGGER_SYSVIEW_RecordExitISR();
 }
 
@@ -74,8 +103,13 @@ void increaseSpeedHandler()
         uint32_t currentTime = time_us_32();
         if (currentTime - posButtonPushedLastTime > DEBOUNCE_TIME)
         {
-            targetMotorPosition_ = 2000;
-
+            
+                targetMotorSpeed_ = 50u;
+                setDirectionLeft(FORWARD);
+                setSpeedLeft(targetMotorSpeed_);
+                setDirectionRight(FORWARD);
+                setSpeedRight(targetMotorSpeed_);
+           
             // currentMotorSpeed_ += 10u;
             // if (currentMotorSpeed_ > 100u)
             // {
@@ -100,11 +134,11 @@ void decreaseSpeedHandler()
         uint32_t currentTime = time_us_32();
         if (currentTime - negButtonPushedLastTime > DEBOUNCE_TIME)
         {
-            currentMotorSpeed_ -= 10u;
-            if (currentMotorSpeed_ == 0u || currentMotorSpeed_ > 100u)  // undeflow
-            {
-                currentMotorSpeed_ = 0u;
-            }
+            targetMotorSpeed_ = 50u;
+                setDirectionLeft(BACKWARD);
+                setSpeedLeft(targetMotorSpeed_);
+                setDirectionRight(BACKWARD);
+                setSpeedRight(targetMotorSpeed_);
             negButtonPushedLastTime = time_us_32();
             SEGGER_RTT_WriteString(0, "NEG SPEED IRQ\n");
         }
@@ -115,22 +149,16 @@ void decreaseSpeedHandler()
 
 bool controlLoop(struct repeating_timer* t)
 {
-    uint32_t currentT = time_us_32();
+    // rc signal from 0.07 to 0.17. Middle Point at 0.12
+    int input_start = 0;    // The lowest number of the range input.
+    int input_end = 50;    // The largest number of the range input.
+    int output_start = 0; // The lowest number of the range output.
+    int output_end = 100;  // The largest number of the range output.
+    double slope = 1.0 * (output_end - output_start) / (input_end - input_start);
 
-    float dt = ((float)currentT - prevT) / 1.0e6;
-    prevT = currentT;
+    int8_t channelNormed = (int8_t)(rc_dutyCycle_ch2*1000);
+    int8_t u = output_start + slope * (channelNormed - input_start);
 
-    // error
-    uint32_t e = targetMotorPosition_ - currentMotorPosition_;
-
-    // D
-    float dedt = (e - ePrev) / dt;
-
-    // I
-    eIntegral = eIntegral + e * dt;
-
-    // Control signal
-    float u = kP * e + kD * dedt + kI * eIntegral;
     targetMotorSpeed_ = fabs(u);
 
     if (targetMotorSpeed_ > 100u)
@@ -138,17 +166,115 @@ bool controlLoop(struct repeating_timer* t)
         targetMotorSpeed_ = 100u;
     }
 
-    targetMotorDirection_ = LEFT;
-    if (u < 0)
+    targetMotorDirectionLeft_ = FORWARD;
+    targetMotorDirectionRight_ = FORWARD;
+    if (channelNormed < 0)
     {
-        targetMotorDirection_ = RIGHT;
+        targetMotorDirectionLeft_ = BACKWARD;
+        targetMotorDirectionRight_ = BACKWARD;
     }
 
-    setDirection(targetMotorDirection_);
-    setSpeed(targetMotorSpeed_);
-
-    ePrev = e;
+    setDirectionLeft(targetMotorDirectionLeft_);
+    setDirectionRight(targetMotorDirectionRight_);
+    setSpeedLeft(targetMotorSpeed_);
+    setSpeedRight(targetMotorSpeed_);
+    
     return true;
+}
+
+// set the irq handler
+    static void pio_irq_handler()
+    {
+        int state_machine = -1;
+        // check which IRQ was raised:
+        for (int i = 0; i < 4; i++)
+        {
+            if (pio0_hw->irq & 1<<i)
+            {
+                // clear interrupt
+                pio0_hw->irq = 1 << i;
+                // read pulse width from the FIFO
+                pulsewidth[i] = pio_sm_get(rcPio_, i);
+                // read low period from the FIFO
+                period[i] = pio_sm_get(rcPio_, i);
+                // clear interrupt
+                pio0_hw->irq = 1 << i;
+            }
+        }
+    }
+
+void initialize_RC_PIO(uint *pin_list, uint num_of_pins)
+{
+    // pio 0 is used
+    rcPio_ = pio0;
+    // load the pio program into the pio memory
+    uint offset = pio_add_program(rcPio_, &PwmIn_program);
+    // start num_of_pins state machines
+    for (int i = 0; i < num_of_pins; i++)
+    {
+        // prepare state machine i
+        pulsewidth[i] = 0;
+        period[i] = 0;
+
+        // configure the used pins (pull down, controlled by PIO)
+        gpio_pull_down(pin_list[i]);
+        pio_gpio_init(rcPio_, pin_list[i]);
+        // make a sm config
+        pio_sm_config c = PwmIn_program_get_default_config(offset);
+        // set the 'jmp' pin
+        sm_config_set_jmp_pin(&c, pin_list[i]);
+        // set the 'wait' pin (uses 'in' pins)
+        sm_config_set_in_pins(&c, pin_list[i]);
+        // set shift direction
+        sm_config_set_in_shift(&c, false, false, 0);
+        // init the pio sm with the config
+        pio_sm_init(rcPio_, i, offset, &c);
+        // enable the sm
+        pio_sm_set_enabled(rcPio_, i, true);
+    }
+    // set the IRQ handler
+    irq_set_exclusive_handler(PIO0_IRQ_0, pio_irq_handler);
+    // enable the IRQ
+    irq_set_enabled(PIO0_IRQ_0, true);
+    // allow irqs from the low 4 state machines
+    pio0_hw->inte0 = PIO_IRQ0_INTE_SM0_BITS | PIO_IRQ0_INTE_SM1_BITS | PIO_IRQ0_INTE_SM2_BITS | PIO_IRQ0_INTE_SM3_BITS ;
+};
+
+ // read the period and pulsewidth
+float rc_readCh1(void)
+{
+    // Convert from clock cycle to SI
+
+    // one clock cycle is 1/125000000 seconds
+    rc_period_ch1 = period[0] * 0.000000008;
+    
+    // read_pulsewidth (in seconds)
+    
+    // one clock cycle is 1/125000000 seconds
+    rc_pulseWidth_ch1 = pulsewidth[0] * 0.000000008;
+    
+    // read_dutycycle (between 0 and 1)
+    rc_dutyCycle_ch1 = roundf(((float)pulsewidth[0] / (float)period[0]) * 100.0f) / 100.0f - 0.12f;
+
+    return 0;
+}
+
+float rc_readCh2(void)
+{
+    // Convert from clock cycle to SI
+
+    // one clock cycle is 1/125000000 seconds
+    rc_period_ch2 = period[1] * 0.000000008;
+    
+    // read_pulsewidth (in seconds)
+    
+    // one clock cycle is 1/125000000 seconds
+    rc_pulseWidth_ch2 = pulsewidth[1] * 0.000000008;
+    
+    // read_dutycycle (between 0 and 1)
+    rc_dutyCycle_ch2 = roundf(((float)pulsewidth[1] / (float)period[1])* 100.0f) / 100.0f -0.12f;
+
+    return 0;
 }
 
 int main()
@@ -183,14 +309,14 @@ int main()
 
     init_systick();
 
-    // Motor Driver
-    gpio_init(MOTOR_IN1);
-    gpio_set_dir(MOTOR_IN1, GPIO_OUT);
-    gpio_init(MOTOR_IN2);
-    gpio_set_dir(MOTOR_IN2, GPIO_OUT);
+    // Left Motor Driver
+    gpio_init(LEFT_MOTOR_IN1);
+    gpio_set_dir(LEFT_MOTOR_IN1, GPIO_OUT);
+    gpio_init(LEFT_MOTOR_IN2);
+    gpio_set_dir(LEFT_MOTOR_IN2, GPIO_OUT);
 
-    gpio_set_function(MOTOR_PWM, GPIO_FUNC_PWM);
-    uint16_t slice_num = pwm_gpio_to_slice_num(MOTOR_PWM);
+    gpio_set_function(LEFT_MOTOR_PWM, GPIO_FUNC_PWM);
+    uint16_t slice_num = pwm_gpio_to_slice_num(LEFT_MOTOR_PWM);
 
     // PWM Freq. 5 kHz
     int32_t f_sys = clock_get_hz(clk_sys);
@@ -199,17 +325,37 @@ int main()
     pwm_set_wrap(slice_num, 0xFFFF);
 
     // Set default start direction (left)
-    setDirection(currentMotorDirection_);
+    setDirectionLeft(currentMotorDirectionLeft_);
+
+    // Right Motor Driver
+    gpio_init(RIGHT_MOTOR_IN1);
+    gpio_set_dir(RIGHT_MOTOR_IN1, GPIO_OUT);
+    gpio_init(RIGHT_MOTOR_IN2);
+    gpio_set_dir(RIGHT_MOTOR_IN2, GPIO_OUT);
+
+    gpio_set_function(RIGHT_MOTOR_PWM, GPIO_FUNC_PWM);
+    uint16_t slice_num_right = pwm_gpio_to_slice_num(RIGHT_MOTOR_PWM);
+
+    // PWM Freq. 5 kHz
+    pwm_set_clkdiv(slice_num_right, divider);
+    pwm_set_wrap(slice_num_right, 0xFFFF);
+
+    // Set default start direction (left)
+    setDirectionRight(currentMotorDirectionRight_);
 
     // Quadrature Encoder PIO init. Position get's read every 1ms in systick irq
-    pio_ = pio0;
+    pio_ = pio1;
     uint16_t offset = pio_add_program(pio_, &quadrature_program);
     sm_ = pio_claim_unused_sm(pio_, true);
     quadrature_program_init(pio_, sm_, offset, QUADRATURE_A_PIN, QUADRATURE_B_PIN);
 
+    // Read RC signal for left channel
+    uint pin_list[2] = {13, 12};
+    initialize_RC_PIO(pin_list, 2);
+
     // Setup the control loop
     struct repeating_timer timer;
-    add_repeating_timer_ms(1000, controlLoop, NULL, &timer);
+    add_repeating_timer_ms(1, controlLoop, NULL, &timer);
 
     while (true)
     {
@@ -217,43 +363,82 @@ int main()
         sleep_us(2500);
         gpio_put(LED_PIN, 0);
         sleep_us(2500);
-        printf("%d \t %d \t %d\n", currentMotorPosition_, targetMotorPosition_, targetMotorSpeed_);
+        
+        printf("%.8f \t %.8f\n", rc_dutyCycle_ch1, rc_dutyCycle_ch2);
+        //printf("%d \t %d \t %d \t %d\n", currentMotorPosition_, targetMotorPosition_, currentMotorSpeedLeft_, currentMotorSpeedRight_);
     }
 }
 
-void setSpeed(uint8_t dutyCycle)
+void setSpeedLeft(uint8_t dutyCycle)
 {
-    currentMotorSpeed_ = dutyCycle;  // TODO: update speed from encoder read values
+    currentMotorSpeedLeft_ = dutyCycle;  // TODO: update speed from encoder read values
 
-    uint16_t slice_num = pwm_gpio_to_slice_num(MOTOR_PWM);
+    uint16_t slice_num = pwm_gpio_to_slice_num(LEFT_MOTOR_PWM);
     uint16_t duty = dutyCycle;                     // duty cycle, in percent
     uint16_t level = (0xFFFF - 1u) * duty / 100u;  // calculate channel level from given duty cycle in %
     pwm_set_chan_level(slice_num, 0, level);
     pwm_set_enabled(slice_num, true);
 }
 
-void setDirection(Direction motorDirection)
+void setSpeedRight(uint8_t dutyCycle)
 {
-    currentMotorDirection_ = motorDirection;
+    currentMotorSpeedRight_ = dutyCycle;  // TODO: update speed from encoder read values
+
+    uint16_t slice_num = pwm_gpio_to_slice_num(RIGHT_MOTOR_PWM);
+    uint16_t duty = dutyCycle;                     // duty cycle, in percent
+    uint16_t level = (0xFFFF - 1u) * duty / 100u;  // calculate channel level from given duty cycle in %
+    pwm_set_chan_level(slice_num, 1, level);
+    pwm_set_enabled(slice_num, true);
+}
+
+void setDirectionLeft(Direction motorDirection)
+{
+    currentMotorDirectionLeft_ = motorDirection;
     switch (motorDirection)
     {
-        case LEFT:
+        case FORWARD:
         {
-            gpio_put(MOTOR_IN1, true);
-            gpio_put(MOTOR_IN2, false);
+            gpio_put(LEFT_MOTOR_IN1, true);
+            gpio_put(LEFT_MOTOR_IN2, false);
             break;
         }
-        case RIGHT:
+        case BACKWARD:
         {
-            gpio_put(MOTOR_IN1, true);
-            gpio_put(MOTOR_IN2, false);
+            gpio_put(LEFT_MOTOR_IN1, false);
+            gpio_put(LEFT_MOTOR_IN2, true);
             break;
         }
         default:
         {
             // Left
-            gpio_put(MOTOR_IN1, true);
-            gpio_put(MOTOR_IN2, false);
+            gpio_put(LEFT_MOTOR_IN1, true);
+            gpio_put(LEFT_MOTOR_IN2, false);
+        }
+    }
+}
+
+void setDirectionRight(Direction motorDirection)
+{
+    currentMotorDirectionLeft_ = motorDirection;
+    switch (motorDirection)
+    {
+        case FORWARD:
+        {
+            gpio_put(RIGHT_MOTOR_IN1, true);
+            gpio_put(RIGHT_MOTOR_IN2, false);
+            break;
+        }
+        case BACKWARD:
+        {
+            gpio_put(RIGHT_MOTOR_IN1, false);
+            gpio_put(RIGHT_MOTOR_IN2, true);
+            break;
+        }
+        default:
+        {
+            // Left
+            gpio_put(RIGHT_MOTOR_IN1, true);
+            gpio_put(RIGHT_MOTOR_IN2, false);
         }
     }
 }

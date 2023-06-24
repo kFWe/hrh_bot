@@ -1,5 +1,8 @@
 cmake_minimum_required(VERSION 3.13)
 
+# Include build functions from Pico SDK
+include($ENV{PICO_SDK_PATH}/external/pico_sdk_import.cmake)
+include($ENV{PICO_SDK_PATH}/tools/CMakeLists.txt)
 
 include(pico_sdk_import.cmake)
 project(hrh_bot C CXX ASM)
