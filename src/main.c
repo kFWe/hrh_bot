@@ -1,5 +1,4 @@
 #include <math.h>
-#include <stdio.h>
 #include "SEGGER_RTT.h"
 #include "SEGGER_SYSVIEW.h"
 #include "hardware/clocks.h"
@@ -11,6 +10,7 @@
 #include "quadrature.pio.h"
 #include "PwmIn.pio.h"
 #include <float.h>
+#include <stdio.h>
 
 
 /***********************************
@@ -63,8 +63,8 @@ typedef enum Direction
     FORWARD,
     BACKWARD
 } Direction;
-uint32_t currentMotorSpeedLeft_ = 0u;  // pwm
-uint32_t currentMotorSpeedRight_ = 0u;  // pwm
+uint8_t currentMotorSpeedLeft_ = 0u;  // pwm
+uint8_t currentMotorSpeedRight_ = 0u;  // pwm
 Direction currentMotorDirectionLeft_ = FORWARD;
 Direction targetMotorDirectionLeft_ = FORWARD;
 Direction currentMotorDirectionRight_ = FORWARD;
@@ -83,7 +83,7 @@ float rc_readCh1(void);
 float rc_readCh2(void);
 void initialize_RC_PIO(uint *pin_list, uint num_of_pins);
 
-// 1ms Systick irq. Used to read rc 
+// 1ms Systick irq. Used to update the static vars for the rc channel data
 extern void isr_systick()
 {
     SEGGER_SYSVIEW_RecordEnterISR();
@@ -117,13 +117,13 @@ void pio_irq_handler()
 // 1ms control loop
 bool controlLoop(struct repeating_timer* t)
 {
-    // rc signal from 0.07 to 0.17. Middle Point at 0.12
     int input_start = 0;    // The lowest number of the range input.
     int input_end = 50;    // The largest number of the range input.
     int output_start = 0; // The lowest number of the range output.
     int output_end = 100;  // The largest number of the range output.
     double slope = 1.0 * (output_end - output_start) / (input_end - input_start);
 
+    // rc signal used is the pulse width of the rc receiver which was normed to be -0.5 to 0.5, with 0.0 beeing the middle point.
     int8_t ch1Normed = (int8_t)(rc_pulseWidth_ch1 * 100);
     int8_t ch2Normed = (int8_t)(rc_pulseWidth_ch2 * 100);
     
@@ -131,6 +131,8 @@ bool controlLoop(struct repeating_timer* t)
     {
         int8_t mixedLeft = (ch1Normed - ch2Normed);
         int8_t mixedRight = (ch1Normed + ch2Normed);
+
+        // Calculate the duty cycle for the pwm used to control the motor and map the rc range (0 to 50 to 0 to 100)
         leftMotorTargetSpeed_  = fabs(output_start + slope * ( mixedLeft - input_start));
         rightMotorTargetSpeed_ = fabs(output_start + slope * ( mixedRight - input_start));
 
@@ -189,7 +191,6 @@ int main()
     SEGGER_RTT_ConfigUpBuffer(0, NULL, NULL, 0, SEGGER_RTT_MODE_BLOCK_IF_FIFO_FULL);
 
     SEGGER_RTT_WriteString(0, "SEGGER Real-Time-Terminal Sample\r\n\r\n");
-    SEGGER_RTT_WriteString(0, "###### Testing SEGGER_printf() ######\r\n");
 
     // Left Motor Driver
     gpio_init(LEFT_MOTOR_IN1);
@@ -223,7 +224,7 @@ int main()
     // Init irq which reads out the signals
     init_systick();
 
-    // Quadrature Encoder PIO init. Position get's read every 1ms in systick irq
+    // Quadrature Encoder PIO init (not used yet).
     pio_ = pio1;
     uint16_t offset = pio_add_program(pio_, &quadrature_program);
     sm_ = pio_claim_unused_sm(pio_, true);
@@ -239,9 +240,8 @@ int main()
 
     while (true)
     {
-        
+        sleep_ms(1);
         printf("%.8f \t %.8f \t %d \t %d \n", rc_pulseWidth_ch1, rc_pulseWidth_ch2, leftMotorTargetSpeed_, rightMotorTargetSpeed_);
-        //printf("%d \t %d \t %d \t %d\n", currentMotorPosition_, targetMotorPosition_, currentMotorSpeedLeft_, currentMotorSpeedRight_);
     }
 }
 
