@@ -64,6 +64,13 @@ typedef enum Direction
     FORWARD,
     BACKWARD
 } Direction;
+typedef enum MixStrategy
+{
+    ADD,
+    LINEAR,
+    EXPONENTIAL
+}MixStrategy;
+bool isFlipped = false;
 uint8_t currentMotorSpeedLeft_ = 0u;   // pwm
 uint8_t currentMotorSpeedRight_ = 0u;  // pwm
 Direction currentMotorDirectionLeft_ = FORWARD;
@@ -119,11 +126,11 @@ void pio_irq_handler()
 // 1ms control loop
 bool controlLoop(struct repeating_timer* t)
 {
-    int input_start = 0;   // The lowest number of the range input.
-    int input_end = 50;    // The largest number of the range input.
-    int output_start = 0;  // The lowest number of the range output.
-    int output_end = 100;  // The largest number of the range output.
-    double slope = 1.0 * (output_end - output_start) / (input_end - input_start);
+    // int input_start = 0;   // The lowest number of the range input.
+    // int input_end = 50;    // The largest number of the range input.
+    // int output_start = 0;  // The lowest number of the range output.
+    // int output_end = 100;  // The largest number of the range output.
+    // double slope = 1.0 * (output_end - output_start) / (input_end - input_start);
 
     // rc signal used is the pulse width of the rc receiver which was normed to be -0.5 to 0.5, with 0.0 beeing the
     // middle point.
@@ -132,12 +139,14 @@ bool controlLoop(struct repeating_timer* t)
 
     if (mixing_)
     {
-        int8_t mixedLeft = (ch1Normed - ch2Normed);
-        int8_t mixedRight = (ch1Normed + ch2Normed);
+        int8_t mixedLeft = (ch1Normed + ch2Normed);
+        int8_t mixedRight = (ch1Normed - ch2Normed);
 
         // Calculate the duty cycle for the pwm used to control the motor and map the rc range (0 to 50 to 0 to 100)
-        leftMotorTargetSpeed_ = fabs(output_start + slope * (mixedLeft - input_start));
-        rightMotorTargetSpeed_ = fabs(output_start + slope * (mixedRight - input_start));
+        // leftMotorTargetSpeed_ = fabs(output_start + slope * (mixedLeft - input_start));
+        // rightMotorTargetSpeed_ = fabs(output_start + slope * (mixedRight - input_start));
+        leftMotorTargetSpeed_ = abs(mixedLeft);
+        rightMotorTargetSpeed_ = abs(mixedRight);
 
         targetMotorDirectionLeft_ = FORWARD;
         targetMotorDirectionRight_ = FORWARD;
@@ -152,12 +161,14 @@ bool controlLoop(struct repeating_timer* t)
     }
     else
     {
-        leftMotorTargetSpeed_ = fabs(output_start + slope * (ch1Normed - input_start));
-        rightMotorTargetSpeed_ = fabs(output_start + slope * (ch1Normed - input_start));
+        // leftMotorTargetSpeed_ = fabs(output_start + slope * (ch2Normed - input_start));
+        // rightMotorTargetSpeed_ = fabs(output_start + slope * (ch2Normed - input_start));
+        leftMotorTargetSpeed_ = ch2Normed;
+        rightMotorTargetSpeed_ = ch2Normed;
 
         targetMotorDirectionLeft_ = FORWARD;
         targetMotorDirectionRight_ = FORWARD;
-        if (ch1Normed < 0)
+        if (ch2Normed < 0)
         {
             targetMotorDirectionLeft_ = BACKWARD;
             targetMotorDirectionRight_ = BACKWARD;
@@ -194,7 +205,7 @@ int main()
     SEGGER_RTT_WriteString(0, "SEGGER Real-Time-Terminal Sample\r\n\r\n");
 
     // IMU MPU6050
-    init_mpu_i2c();
+    //init_mpu_i2c();
 
     // Left Motor Driver
     gpio_init(LEFT_MOTOR_IN1);
@@ -240,20 +251,20 @@ int main()
     while (true)
     {
         sleep_ms(1);
-        mpu6050_read_raw(acceleration, gyro, &temp);
-        // printf("%.8f \t %.8f \t %d \t %d \n", rc_pulseWidth_ch1, rc_pulseWidth_ch2, leftMotorTargetSpeed_,
-        //        rightMotorTargetSpeed_);
-        // ACC X Y Z
-        printf("%d \t %d \t %d \t", acceleration[0], acceleration[1], acceleration[2]);
+        //mpu6050_read_raw(acceleration, gyro, &temp);
+        printf("%.8f \t %.8f \t %d \t %d \n", rc_pulseWidth_ch1, rc_pulseWidth_ch2, leftMotorTargetSpeed_,
+               rightMotorTargetSpeed_);
+        // // ACC X Y Z
+        // printf("%d \t %d \t %d \t", acceleration[0], acceleration[1], acceleration[2]);
 
-        // GYRO X Y Z
-        printf("%d \t %d \t %d \t", gyro[0], gyro[1], gyro[2]);
+        // // GYRO X Y Z
+        // printf("%d \t %d \t %d \t", gyro[0], gyro[1], gyro[2]);
 
-        // Temperature is simple so use the datasheet calculation to get deg C.
-        // Note this is chip temperature.
+        // // Temperature is simple so use the datasheet calculation to get deg C.
+        // // Note this is chip temperature.
 
-        // Temp
-        printf("%f\n", (temp / 340.0) + 36.53);
+        // // Temp
+        // printf("%f\n", (temp / 340.0) + 36.53);
     }
 }
 
@@ -341,7 +352,7 @@ float rc_readCh1(void)
     if (pulsewidth[0] > 0)
     {
         // one clock cycle is 1/125000 ms
-        rc_pulseWidth_ch1 = (floorf((2.0f * (float)pulsewidth[0] * 0.000008f) * 100.0f) / 100.0f) - 1.5f;
+        rc_pulseWidth_ch1 = 2.0f*((floorf((2.0f * (float)pulsewidth[0] * 0.000008f) * 100.0f) / 100.0f) - 1.5f);
     }
     // read_dutycycle (between 0 and 1)
     rc_dutyCycle_ch1 = roundf(((float)pulsewidth[0] / (float)period[0]) * 100.0f) / 100.0f - 0.12f;
@@ -358,7 +369,7 @@ float rc_readCh2(void)
     if (pulsewidth[0] > 0)
     {
         // one clock cycle is 1/125000 ms
-        rc_pulseWidth_ch2 = (floorf((2.0f * (float)pulsewidth[1] * 0.000008f) * 100.0f) / 100.0f) - 1.5f;
+        rc_pulseWidth_ch2 = 2.0f*((floorf((2.0f * (float)pulsewidth[1] * 0.000008f) * 100.0f) / 100.0f) - 1.5f);
     }
 
     // read_dutycycle (between 0 and 1)
