@@ -24,8 +24,8 @@
 #define LEFT_MOTOR_IN1 3
 #define LEFT_MOTOR_IN2 4
 #define LEFT_MOTOR_PWM 5
-#define RIGHT_MOTOR_IN1 6
-#define RIGHT_MOTOR_IN2 7
+#define RIGHT_MOTOR_IN1 7
+#define RIGHT_MOTOR_IN2 6
 #define RIGHT_MOTOR_PWM 8
 
 #define MPU6050_I2C 1
@@ -39,9 +39,13 @@
 // Motor Vars
 uint8_t leftMotorTargetSpeed_ = 0u;
 uint8_t rightMotorTargetSpeed_ = 0u;
+int8_t mixedLeft_ = 0;
+int8_t mixedRight_ = 0;
 uint16_t pwm_wrap_ = 12500u;
 uint8_t pwm_clk_div_ = 2u;
 bool mixing_ = true;
+uint16_t leftPwmLevel_ = 0;
+uint16_t rightPwmLevel_ = 0;
 
 // MPU Vars
 i2c_inst_t* mpu_i2c_;
@@ -69,7 +73,7 @@ typedef enum MixStrategy
     ADD,
     LINEAR,
     EXPONENTIAL
-}MixStrategy;
+} MixStrategy;
 bool isFlipped = false;
 uint8_t currentMotorSpeedLeft_ = 0u;   // pwm
 uint8_t currentMotorSpeedRight_ = 0u;  // pwm
@@ -139,24 +143,48 @@ bool controlLoop(struct repeating_timer* t)
 
     if (mixing_)
     {
-        int8_t mixedLeft = (ch1Normed + ch2Normed);
-        int8_t mixedRight = (ch1Normed - ch2Normed);
+        if (ch2Normed == 0)
+        {
+            mixedLeft_ = ch1Normed;
+            mixedRight_ = -1 * ch1Normed;
+        }
+        else
+        {
+            mixedLeft_ = ch1Normed < 0 ? (abs(ch2Normed) - abs(ch1Normed)) : ch2Normed;
+            mixedRight_ = ch1Normed > 0 ? (abs(ch2Normed) - abs(ch1Normed)) : ch2Normed;
+        }
 
         // Calculate the duty cycle for the pwm used to control the motor and map the rc range (0 to 50 to 0 to 100)
         // leftMotorTargetSpeed_ = fabs(output_start + slope * (mixedLeft - input_start));
         // rightMotorTargetSpeed_ = fabs(output_start + slope * (mixedRight - input_start));
-        leftMotorTargetSpeed_ = abs(mixedLeft);
-        rightMotorTargetSpeed_ = abs(mixedRight);
+        leftMotorTargetSpeed_ = abs(mixedLeft_);
+        rightMotorTargetSpeed_ = abs(mixedRight_);
 
-        targetMotorDirectionLeft_ = FORWARD;
-        targetMotorDirectionRight_ = FORWARD;
-        if (mixedLeft < 0)
+        if (ch2Normed == 0)
         {
-            targetMotorDirectionLeft_ = BACKWARD;
+            if (ch1Normed < 0)
+            {
+                targetMotorDirectionLeft_ = BACKWARD;
+                targetMotorDirectionRight_ = FORWARD;
+            }
+            else
+            {
+                targetMotorDirectionLeft_ = FORWARD;
+                targetMotorDirectionRight_ = BACKWARD;
+            }
         }
-        if (mixedRight < 0)
+        else
         {
-            targetMotorDirectionRight_ = BACKWARD;
+            if (ch2Normed > 0)
+            {
+                targetMotorDirectionLeft_ = FORWARD;
+                targetMotorDirectionRight_ = FORWARD;
+            }
+            else
+            {
+                targetMotorDirectionLeft_ = BACKWARD;
+                targetMotorDirectionRight_ = BACKWARD;
+            }
         }
     }
     else
@@ -205,7 +233,7 @@ int main()
     SEGGER_RTT_WriteString(0, "SEGGER Real-Time-Terminal Sample\r\n\r\n");
 
     // IMU MPU6050
-    //init_mpu_i2c();
+    // init_mpu_i2c();
 
     // Left Motor Driver
     gpio_init(LEFT_MOTOR_IN1);
@@ -251,9 +279,9 @@ int main()
     while (true)
     {
         sleep_ms(1);
-        //mpu6050_read_raw(acceleration, gyro, &temp);
-        printf("%.8f \t %.8f \t %d \t %d \n", rc_pulseWidth_ch1, rc_pulseWidth_ch2, leftMotorTargetSpeed_,
-               rightMotorTargetSpeed_);
+        // mpu6050_read_raw(acceleration, gyro, &temp);
+        printf("%.8f \t %.8f \t %d \t %d \t %d \t %d  \t %d \t %d  \n", rc_pulseWidth_ch1, rc_pulseWidth_ch2,
+               mixedLeft_, mixedRight_, leftMotorTargetSpeed_, rightMotorTargetSpeed_, leftPwmLevel_, rightPwmLevel_);
         // // ACC X Y Z
         // printf("%d \t %d \t %d \t", acceleration[0], acceleration[1], acceleration[2]);
 
@@ -273,9 +301,9 @@ void setSpeedLeft(uint8_t dutyCycle)
     currentMotorSpeedLeft_ = dutyCycle;  // TODO: update speed from encoder read values
 
     uint16_t slice_num = pwm_gpio_to_slice_num(LEFT_MOTOR_PWM);
-    uint16_t duty = dutyCycle;                        // duty cycle, in percent
-    uint16_t level = (pwm_wrap_ - 1u) * duty / 100u;  // calculate channel level from given duty cycle in %
-    pwm_set_chan_level(slice_num, pwm_gpio_to_channel(LEFT_MOTOR_PWM), level);
+    uint16_t duty = dutyCycle;                       // duty cycle, in percent
+    leftPwmLevel_ = (pwm_wrap_ - 1u) * duty / 100u;  // calculate channel level from given duty cycle in %
+    pwm_set_chan_level(slice_num, pwm_gpio_to_channel(LEFT_MOTOR_PWM), leftPwmLevel_);
     pwm_set_enabled(slice_num, true);
 }
 
@@ -285,8 +313,8 @@ void setSpeedRight(uint8_t dutyCycle)
 
     uint16_t slice_num = pwm_gpio_to_slice_num(RIGHT_MOTOR_PWM);
     uint16_t duty = dutyCycle;                        // duty cycle, in percent
-    uint16_t level = (pwm_wrap_ - 1u) * duty / 100u;  // calculate channel level from given duty cycle in %
-    pwm_set_chan_level(slice_num, pwm_gpio_to_channel(RIGHT_MOTOR_PWM), level);
+    rightPwmLevel_ = (pwm_wrap_ - 1u) * duty / 100u;  // calculate channel level from given duty cycle in %
+    pwm_set_chan_level(slice_num, pwm_gpio_to_channel(RIGHT_MOTOR_PWM), rightPwmLevel_);
     pwm_set_enabled(slice_num, true);
 }
 
@@ -352,7 +380,7 @@ float rc_readCh1(void)
     if (pulsewidth[0] > 0)
     {
         // one clock cycle is 1/125000 ms
-        rc_pulseWidth_ch1 = 2.0f*((floorf((2.0f * (float)pulsewidth[0] * 0.000008f) * 100.0f) / 100.0f) - 1.5f);
+        rc_pulseWidth_ch1 = 2.0f * ((floorf((2.0f * (float)pulsewidth[0] * 0.000008f) * 100.0f) / 100.0f) - 1.5f);
     }
     // read_dutycycle (between 0 and 1)
     rc_dutyCycle_ch1 = roundf(((float)pulsewidth[0] / (float)period[0]) * 100.0f) / 100.0f - 0.12f;
@@ -369,7 +397,7 @@ float rc_readCh2(void)
     if (pulsewidth[0] > 0)
     {
         // one clock cycle is 1/125000 ms
-        rc_pulseWidth_ch2 = 2.0f*((floorf((2.0f * (float)pulsewidth[1] * 0.000008f) * 100.0f) / 100.0f) - 1.5f);
+        rc_pulseWidth_ch2 = 2.0f * ((floorf((2.0f * (float)pulsewidth[1] * 0.000008f) * 100.0f) / 100.0f) - 1.5f);
     }
 
     // read_dutycycle (between 0 and 1)
