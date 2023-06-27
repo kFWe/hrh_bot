@@ -28,7 +28,8 @@ RUN apt-get update && apt-get install -y \
     libftdi-dev \
     libusb-1.0-0-dev \
     pkg-config \
-    cmake
+    cmake \
+    clang-format
 
 # GDB dependencies
 RUN apt-get update && apt-get install -y \
