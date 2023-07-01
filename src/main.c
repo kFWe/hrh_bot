@@ -49,6 +49,16 @@ uint8_t pwmDeadzone_ = 7;
 bool isMpuPresent_ = true;
 i2c_inst_t* mpu_i2c_;
 uint8_t mpu_addr_ = 0x68;  // 0x68;
+float offsetAccX = -0.03f;
+float offsetAccY = -0.3f;
+float offsetGyroX = 3.78f;
+float offsetGyroY = 3.81f;
+float offsetGyroZ = 3.81f;
+float acceleration[3] = {0.0f};
+float gyro[3] = {0.0f};
+
+#define MPU_ACC_SCALE 16384.0f
+#define MPU_GYRO_SCALE 131.0f
 
 // RC Var
 PIO rcPio_;
@@ -95,7 +105,10 @@ float rc_readCh3(void);
 void initialize_rc_PIO(uint* pin_list, uint num_of_pins);
 void init_mpu_i2c();
 void mpu6050_reset();
-void mpu6050_read_raw(int16_t accel[3], int16_t gyro[3], int16_t* temp);
+void mpu6050_read_raw(int16_t accel[3], int16_t gyro[3], int16_t* temperature);
+void calculate_imu_error();
+void calculateAcceleration(int16_t rawSensorValues[3], float acceleration[3]);  // Calculate the values in m/s^2
+void calculateGyro(int16_t rawSensorValues[3], float gyro[3]);                  // Calculate °/s
 
 // 1ms Systick irq. Used to update the static vars for the rc channel data
 extern void isr_systick()
@@ -601,6 +614,7 @@ void init_mpu_i2c()
     gpio_set_function(MPU6050_SCL, GPIO_FUNC_I2C);
 
     mpu6050_reset();
+    calculate_imu_error();
 }
 void mpu6050_reset()
 {
@@ -615,7 +629,7 @@ void mpu6050_reset()
     }
 }
 
-void mpu6050_read_raw(int16_t accel[3], int16_t gyro[3], int16_t* temp)
+void mpu6050_read_raw(int16_t accel[3], int16_t gyro[3], int16_t* temperature)
 {
     // For this particular device, we send the device the register we want to read
     // first, then subsequently read from the device. The register is auto incrementing
@@ -643,7 +657,6 @@ void mpu6050_read_raw(int16_t accel[3], int16_t gyro[3], int16_t* temp)
     for (int i = 0; i < 3; i++)
     {
         gyro[i] = (buffer[i * 2] << 8 | buffer[(i * 2) + 1]);
-        ;
     }
 
     // Now temperature from reg 0x41 for 2 bytes
@@ -652,5 +665,67 @@ void mpu6050_read_raw(int16_t accel[3], int16_t gyro[3], int16_t* temp)
     res = i2c_write_blocking(mpu_i2c_, mpu_addr_, &val, 1, true);
     res = i2c_read_blocking(mpu_i2c_, mpu_addr_, buffer, 2, false);  // False - finished with bus
 
-    *temp = buffer[0] << 8 | buffer[1];
+    *temperature = buffer[0] << 8 | buffer[1];
 }
+
+void calculate_imu_error()
+{
+    float accel[3];
+    float gyro[3];
+    float accErrorX = 0.0f;
+    float accErrorY = 0.0f;
+    float gyroErrorX = 0.0f;
+    float gyroErrorY = 0.0f;
+    float gyroErrorZ = 0.0f;
+    int counter = 0;
+    uint8_t buffer[6];
+    while (counter < 200)
+    {
+        // Start reading acceleration registers from register 0x3B for 6 bytes
+        uint8_t val = 0x3B;
+        i2c_write_blocking(mpu_i2c_, mpu_addr_, &val, 1, true);  // true to keep master control of bus
+        i2c_read_blocking(mpu_i2c_, mpu_addr_, buffer, 6, false);
+
+        for (int i = 0; i < 3; i++)
+        {
+            accel[i] = (buffer[i * 2] << 8 | buffer[(i * 2) + 1]) / MPU_ACC_SCALE;
+        }
+        // Sum all readings
+        accErrorX = accErrorY + ((atan((accel[1]) / sqrt(pow((accel[0]), 2) + pow((accel[2]), 2))) * 180 / M_PI));
+        accErrorY = accErrorY + ((atan(-1 * (accel[0]) / sqrt(pow((accel[1]), 2) + pow((accel[2]), 2))) * 180 / M_PI));
+        counter++;
+    }
+
+    // Divide the sum by 200 to get the error value
+    accErrorX = accErrorX / 200.0f;
+    accErrorY = accErrorY / 200.0f;
+    counter = 0;
+    // Read gyro values 200 times
+    while (counter < 200)
+    {
+        uint8_t val = 0x43;
+        i2c_write_blocking(mpu_i2c_, mpu_addr_, &val, 1, true);  // true to keep master control of bus
+        i2c_read_blocking(mpu_i2c_, mpu_addr_, buffer, 6, false);
+        for (int i = 0; i < 3; i++)
+        {
+            gyro[i] = (buffer[i * 2] << 8 | buffer[(i * 2) + 1]) / MPU_GYRO_SCALE;
+        }
+        // Sum all readings
+        gyroErrorX = gyroErrorX + (gyro[0] / 131.0);
+        gyroErrorY = gyroErrorY + (gyro[1] / 131.0);
+        gyroErrorZ = gyroErrorZ + (gyro[2] / 131.0);
+        counter++;
+    }
+    // Divide the sum by 200 to get the error value
+    gyroErrorX = gyroErrorX / 200;
+    gyroErrorY = gyroErrorY / 200;
+    gyroErrorZ = gyroErrorZ / 200;
+    char msg[80];
+    sprintf(msg, "e_accX: %f, e_accY: %f, e_gyroX: %f, e_gyroY: %f, e_gyroZ: %f\n", accErrorX, accErrorY, gyroErrorX,
+            gyroErrorY, gyroErrorZ);
+    SEGGER_RTT_WriteString(0, msg);
+}
+
+void calculateAcceleration(int16_t rawSensorValues[3], float acceleration[3]) {}
+
+void calculateGyro(int16_t rawSensorValues[3], float gyro[3]) {}
