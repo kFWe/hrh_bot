@@ -22,10 +22,10 @@
 #define RC_CH1_PIN 0
 #define RC_CH2_PIN 1
 #define RC_CH3_PIN 2
-#define LEFT_MOTOR_PHASE 3
-#define LEFT_MOTOR_PWM 4
-#define RIGHT_MOTOR_PHASE 5
-#define RIGHT_MOTOR_PWM 6
+#define RIGHT_MOTOR_PWM 3
+#define RIGHT_MOTOR_PHASE 4
+#define LEFT_MOTOR_PWM 5
+#define LEFT_MOTOR_PHASE 6
 #define DRV8835_MODE 7
 
 #define MPU6050_I2C 1
@@ -90,7 +90,7 @@ Direction currentMotorDirectionLeft_ = FORWARD;
 Direction targetMotorDirectionLeft_ = FORWARD;
 Direction currentMotorDirectionRight_ = FORWARD;
 Direction targetMotorDirectionRight_ = FORWARD;
-MixStrategy mixStrategy_ = NONE;
+MixStrategy mixStrategy_ = NEG_EXPONENTIAL;
 
 /***********************************
  * Functions
@@ -254,8 +254,6 @@ bool controlLoop(struct repeating_timer* t)
         }
         case NEG_EXPONENTIAL:
         {
-            mixedLeft_ = abs(ch2Normed);
-            mixedRight_ = abs(ch2Normed);
             if (ch2Normed == 0)
             {
                 // Turn at full speed
@@ -264,11 +262,14 @@ bool controlLoop(struct repeating_timer* t)
                 break;
             }
 
+            mixedLeft_ = abs(ch2Normed);
+            mixedRight_ = abs(ch2Normed);
+
             // Max range for channel is 0 to 100. We need to limit the exponential function around those to points
             // x_norm = ch1/100
             // y = x_norm^a * 100
             // Exponent a > 1
-            float a = 3.0f;
+            float a = 2.0f;
             float x_normed = (float)abs(ch1Normed) / 100.0f;
             float y = pow(x_normed, a) * 100.0f;
 
@@ -281,6 +282,14 @@ bool controlLoop(struct repeating_timer* t)
                 if (mix < 0)  // underflow check
                 {
                     mixedLeft_ = 0;
+                    if (ch2Normed < 80)
+                    {
+                        mixedRight_ += abs((int)0.25f * y);
+                    }
+                    else
+                    {
+                        mixedLeft_ = 20;
+                    }
                 }
                 else
                 {
@@ -295,14 +304,24 @@ bool controlLoop(struct repeating_timer* t)
                 if (mix < 0)  // underflow check
                 {
                     mixedRight_ = 0;
+                    if (ch2Normed < 80)
+                    {
+                        mixedLeft_ += abs((int)0.25f * y);
+                    }
+                    else
+                    {
+                        mixedRight_ = 20;
+                    }
                 }
                 else
                 {
                     mixedRight_ = mix;
                 }
             }
+
             leftMotorTargetSpeed_ = mixedLeft_;
             rightMotorTargetSpeed_ = mixedRight_;
+
             break;
         }
     }
@@ -460,17 +479,17 @@ void set_direction_left(Direction motorDirection)
     {
         case FORWARD:
         {
-            gpio_put(LEFT_MOTOR_PHASE, false);
+            gpio_put(LEFT_MOTOR_PHASE, true);
             break;
         }
         case BACKWARD:
         {
-            gpio_put(LEFT_MOTOR_PHASE, true);
+            gpio_put(LEFT_MOTOR_PHASE, false);
             break;
         }
         default:
         {
-            gpio_put(LEFT_MOTOR_PHASE, false);
+            gpio_put(LEFT_MOTOR_PHASE, true);
         }
     }
 }
@@ -482,18 +501,18 @@ void set_direction_right(Direction motorDirection)
     {
         case FORWARD:
         {
-            gpio_put(RIGHT_MOTOR_PHASE, false);
+            gpio_put(RIGHT_MOTOR_PHASE, true);
             break;
         }
         case BACKWARD:
         {
-            gpio_put(RIGHT_MOTOR_PHASE, true);
+            gpio_put(RIGHT_MOTOR_PHASE, false);
             break;
         }
         default:
         {
             // Left
-            gpio_put(RIGHT_MOTOR_PHASE, false);
+            gpio_put(RIGHT_MOTOR_PHASE, true);
         }
     }
 }
