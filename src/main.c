@@ -21,12 +21,12 @@
 
 #define RC_CH1_PIN 0
 #define RC_CH2_PIN 1
-#define LEFT_MOTOR_IN1 3
-#define LEFT_MOTOR_IN2 4
-#define LEFT_MOTOR_PWM 5
-#define RIGHT_MOTOR_IN1 7
-#define RIGHT_MOTOR_IN2 6
-#define RIGHT_MOTOR_PWM 8
+#define RC_CH3_PIN 2
+#define LEFT_MOTOR_PHASE 3
+#define LEFT_MOTOR_PWM 4
+#define RIGHT_MOTOR_PHASE 5
+#define RIGHT_MOTOR_PWM 6
+#define DRV8835_MODE 7
 
 #define MPU6050_I2C 1
 #define MPU6050_SDA 10
@@ -39,27 +39,24 @@
 // Motor Vars
 uint8_t leftMotorTargetSpeed_ = 0u;
 uint8_t rightMotorTargetSpeed_ = 0u;
-int8_t mixedLeft_ = 0;
-int8_t mixedRight_ = 0;
+uint8_t mixedLeft_ = 0;
+uint8_t mixedRight_ = 0;
 uint16_t pwm_wrap_ = 12500u;
-uint8_t pwm_clk_div_ = 2u;
-bool mixing_ = true;
-uint16_t leftPwmLevel_ = 0;
-uint16_t rightPwmLevel_ = 0;
+uint8_t pwm_clk_div_ = 1u;
+uint8_t pwmDeadzone_ = 7;
 
 // MPU Vars
+bool isMpuPresent_ = true;
 i2c_inst_t* mpu_i2c_;
-uint8_t mpu_addr_ = 0x68;
+uint8_t mpu_addr_ = 0x68;  // 0x68;
 
 // RC Var
 PIO rcPio_;
 uint rcsm_ = 0u;
-float rc_period_ch1 = 0.0f;      // in s
-float rc_pulseWidth_ch1 = 0.0f;  // in s
-float rc_dutyCycle_ch1 = 0.0f;
-float rc_period_ch2 = 0.0f;      // in s
-float rc_pulseWidth_ch2 = 0.0f;  // in s
-float rc_dutyCycle_ch2 = 0.0f;
+float rcPeriodCH1 = 0.0f;      // in ms
+float rcPulseWidthCH1 = 0.0f;  // in ms
+float rcPeriodCH2 = 0.0f;      // in ms
+float rcPulseWidthCH2 = 0.0f;  // in ms
 static uint32_t pulsewidth[4], period[4];
 
 // Motor Vars
@@ -70,29 +67,32 @@ typedef enum Direction
 } Direction;
 typedef enum MixStrategy
 {
-    ADD,
+    NONE,
     LINEAR,
-    EXPONENTIAL
+    POS_EXPONENTIAL,
+    NEG_EXPONENTIAL,
+    LAST
 } MixStrategy;
-bool isFlipped = false;
+bool isFlipped_ = false;
 uint8_t currentMotorSpeedLeft_ = 0u;   // pwm
 uint8_t currentMotorSpeedRight_ = 0u;  // pwm
 Direction currentMotorDirectionLeft_ = FORWARD;
 Direction targetMotorDirectionLeft_ = FORWARD;
 Direction currentMotorDirectionRight_ = FORWARD;
 Direction targetMotorDirectionRight_ = FORWARD;
+MixStrategy mixStrategy_ = NONE;
 
 /***********************************
  * Functions
  ************************************/
 void init_systick();
-void setSpeedLeft(uint8_t dutyCycle);
-void setDirectionLeft(Direction motorDirection);
-void setSpeedRight(uint8_t dutyCycle);
-void setDirectionRight(Direction motorDirection);
+void set_pwm(uint8_t dutyCycle, uint8_t pwmPin);
+void set_direction_left(Direction motorDirection);
+void set_direction_right(Direction motorDirection);
 float rc_readCh1(void);
 float rc_readCh2(void);
-void initialize_RC_PIO(uint* pin_list, uint num_of_pins);
+float rc_readCh3(void);
+void initialize_rc_PIO(uint* pin_list, uint num_of_pins);
 void init_mpu_i2c();
 void mpu6050_reset();
 void mpu6050_read_raw(int16_t accel[3], int16_t gyro[3], int16_t* temp);
@@ -103,6 +103,7 @@ extern void isr_systick()
     SEGGER_SYSVIEW_RecordEnterISR();
     rc_readCh1();
     rc_readCh2();
+    rc_readCh3();
     SEGGER_SYSVIEW_RecordExitISR();
 }
 
@@ -130,79 +131,198 @@ void pio_irq_handler()
 // 1ms control loop
 bool controlLoop(struct repeating_timer* t)
 {
-    // int input_start = 0;   // The lowest number of the range input.
-    // int input_end = 50;    // The largest number of the range input.
-    // int output_start = 0;  // The lowest number of the range output.
-    // int output_end = 100;  // The largest number of the range output.
-    // double slope = 1.0 * (output_end - output_start) / (input_end - input_start);
-
-    // rc signal used is the pulse width of the rc receiver which was normed to be -0.5 to 0.5, with 0.0 beeing the
+    // rc signal used is the pulse width of the rc receiver which was normed to be -1.0 to 1.0, with 0.0 beeing the
     // middle point.
-    int8_t ch1Normed = (int8_t)(rc_pulseWidth_ch1 * 100);
-    int8_t ch2Normed = (int8_t)(rc_pulseWidth_ch2 * 100);
+    int8_t ch1Normed = (int8_t)(rcPulseWidthCH1 * 100);
+    int8_t ch2Normed = (int8_t)(rcPulseWidthCH2 * 100);
 
-    if (mixing_)
+    switch (mixStrategy_)
     {
-        if (ch2Normed == 0)
+        case NONE:
         {
-            mixedLeft_ = ch1Normed;
-            mixedRight_ = -1 * ch1Normed;
+            leftMotorTargetSpeed_ = abs(ch2Normed);
+            rightMotorTargetSpeed_ = abs(ch2Normed);
+            break;
         }
-        else
+        case LINEAR:
         {
-            mixedLeft_ = ch1Normed < 0 ? (abs(ch2Normed) - abs(ch1Normed)) : ch2Normed;
-            mixedRight_ = ch1Normed > 0 ? (abs(ch2Normed) - abs(ch1Normed)) : ch2Normed;
-        }
+            if (ch2Normed == 0)
+            {
+                // Turn at full speed
+                leftMotorTargetSpeed_ = abs(ch1Normed);
+                rightMotorTargetSpeed_ = abs(ch1Normed);
+                break;
+            }
 
-        // Calculate the duty cycle for the pwm used to control the motor and map the rc range (0 to 50 to 0 to 100)
-        // leftMotorTargetSpeed_ = fabs(output_start + slope * (mixedLeft - input_start));
-        // rightMotorTargetSpeed_ = fabs(output_start + slope * (mixedRight - input_start));
-        leftMotorTargetSpeed_ = abs(mixedLeft_);
-        rightMotorTargetSpeed_ = abs(mixedRight_);
+            mixedLeft_ = abs(ch2Normed);
+            mixedRight_ = abs(ch2Normed);
+            int8_t mix = abs(ch2Normed) - abs(ch1Normed);
 
-        if (ch2Normed == 0)
-        {
+            // Right Turn
             if (ch1Normed < 0)
             {
-                targetMotorDirectionLeft_ = BACKWARD;
-                targetMotorDirectionRight_ = FORWARD;
+                if (mix < 0)  // underflow check
+                {
+                    mixedLeft_ = 0;
+                }
+                else
+                {
+                    mixedLeft_ = mix;
+                }
             }
-            else
+
+            // Left Turn
+            if (ch1Normed > 0)
             {
-                targetMotorDirectionLeft_ = FORWARD;
-                targetMotorDirectionRight_ = BACKWARD;
+                if (mix < 0)  // underflow check
+                {
+                    mixedRight_ = 0;
+                }
+                else
+                {
+                    mixedRight_ = mix;
+                }
             }
+            leftMotorTargetSpeed_ = mixedLeft_;
+            rightMotorTargetSpeed_ = mixedRight_;
+            break;
         }
-        else
+        case POS_EXPONENTIAL:
         {
-            if (ch2Normed > 0)
+            mixedLeft_ = abs(ch2Normed);
+            mixedRight_ = abs(ch2Normed);
+
+            if (ch2Normed == 0)
             {
-                targetMotorDirectionLeft_ = FORWARD;
-                targetMotorDirectionRight_ = FORWARD;
+                // Turn at full speed
+                leftMotorTargetSpeed_ = abs(ch1Normed);
+                rightMotorTargetSpeed_ = abs(ch1Normed);
+                break;
             }
-            else
+
+            // Max range for channel is from 0 to 100. We need to limit the exponential function around those to points
+            // x_norm = ch1/100
+            // y = x_norm^a * 100
+            // Exponent 0 < a <= 1
+            float a = 0.5f;
+            float x_normed = (float)abs(ch1Normed) / 100.0f;
+            float y = pow(x_normed, a) * 100.0f;
+
+            int8_t mix = abs(ch2Normed) - abs((int)y);
+
+            // Right Turn
+            if (ch1Normed < 0)
             {
-                targetMotorDirectionLeft_ = BACKWARD;
-                targetMotorDirectionRight_ = BACKWARD;
+                if (mix < 0)  // underflow check
+                {
+                    mixedLeft_ = 0;
+                }
+                else
+                {
+                    mixedLeft_ = mix;
+                }
             }
+
+            // Left Turn
+            if (ch1Normed > 0)
+            {
+                if (mix < 0)  // underflow check
+                {
+                    mixedRight_ = 0;
+                }
+                else
+                {
+                    mixedRight_ = mix;
+                }
+            }
+            leftMotorTargetSpeed_ = mixedLeft_;
+            rightMotorTargetSpeed_ = mixedRight_;
+            break;
         }
+        case NEG_EXPONENTIAL:
+        {
+            mixedLeft_ = abs(ch2Normed);
+            mixedRight_ = abs(ch2Normed);
+            if (ch2Normed == 0)
+            {
+                // Turn at full speed
+                leftMotorTargetSpeed_ = abs(ch1Normed);
+                rightMotorTargetSpeed_ = abs(ch1Normed);
+                break;
+            }
+
+            // Max range for channel is 0 to 100. We need to limit the exponential function around those to points
+            // x_norm = ch1/100
+            // y = x_norm^a * 100
+            // Exponent a > 1
+            float a = 3.0f;
+            float x_normed = (float)abs(ch1Normed) / 100.0f;
+            float y = pow(x_normed, a) * 100.0f;
+
+            int8_t mix = abs(ch2Normed) - abs((int)y);
+
+            // Right Turn
+            if (ch1Normed < 0)
+            {
+                // Driving right
+                if (mix < 0)  // underflow check
+                {
+                    mixedLeft_ = 0;
+                }
+                else
+                {
+                    mixedLeft_ = mix;
+                }
+            }
+
+            // Left Turn
+            if (ch1Normed > 0)
+            {
+                // Driving right
+                if (mix < 0)  // underflow check
+                {
+                    mixedRight_ = 0;
+                }
+                else
+                {
+                    mixedRight_ = mix;
+                }
+            }
+            leftMotorTargetSpeed_ = mixedLeft_;
+            rightMotorTargetSpeed_ = mixedRight_;
+            break;
+        }
+    }
+
+    if (ch2Normed == 0)
+    {
+        if (ch1Normed < 0)
+        {
+            targetMotorDirectionLeft_ = BACKWARD;
+            targetMotorDirectionRight_ = FORWARD;
+        }
+        if (ch1Normed > 0)
+        {
+            targetMotorDirectionLeft_ = FORWARD;
+            targetMotorDirectionRight_ = BACKWARD;
+        }
+        // keep the last direction if both channels are low
     }
     else
     {
-        // leftMotorTargetSpeed_ = fabs(output_start + slope * (ch2Normed - input_start));
-        // rightMotorTargetSpeed_ = fabs(output_start + slope * (ch2Normed - input_start));
-        leftMotorTargetSpeed_ = ch2Normed;
-        rightMotorTargetSpeed_ = ch2Normed;
-
-        targetMotorDirectionLeft_ = FORWARD;
-        targetMotorDirectionRight_ = FORWARD;
-        if (ch2Normed < 0)
+        if (ch2Normed > 0)
+        {
+            targetMotorDirectionLeft_ = FORWARD;
+            targetMotorDirectionRight_ = FORWARD;
+        }
+        else
         {
             targetMotorDirectionLeft_ = BACKWARD;
             targetMotorDirectionRight_ = BACKWARD;
         }
     }
 
+    // Max & Min
     if (leftMotorTargetSpeed_ > 100u)
     {
         leftMotorTargetSpeed_ = 100u;
@@ -211,12 +331,22 @@ bool controlLoop(struct repeating_timer* t)
     {
         rightMotorTargetSpeed_ = 100u;
     }
+    if (leftMotorTargetSpeed_ < pwmDeadzone_)
+    {
+        leftMotorTargetSpeed_ = 0;
+    }
+    if (rightMotorTargetSpeed_ < pwmDeadzone_)
+    {
+        rightMotorTargetSpeed_ = 0;
+    }
 
-    setDirectionLeft(targetMotorDirectionLeft_);
-    setDirectionRight(targetMotorDirectionRight_);
-    setSpeedLeft(leftMotorTargetSpeed_);
-    setSpeedRight(rightMotorTargetSpeed_);
+    set_direction_left(targetMotorDirectionLeft_);
+    set_direction_right(targetMotorDirectionRight_);
+    set_pwm(leftMotorTargetSpeed_, LEFT_MOTOR_PWM);
+    set_pwm(rightMotorTargetSpeed_, RIGHT_MOTOR_PWM);
 
+    // sync pwms
+    pwm_set_mask_enabled((1 << pwm_gpio_to_slice_num(LEFT_MOTOR_PWM)) | (1 << pwm_gpio_to_slice_num(RIGHT_MOTOR_PWM)));
     return true;
 }
 
@@ -233,13 +363,14 @@ int main()
     SEGGER_RTT_WriteString(0, "SEGGER Real-Time-Terminal Sample\r\n\r\n");
 
     // IMU MPU6050
-    // init_mpu_i2c();
+    init_mpu_i2c();
+    gpio_init(DRV8835_MODE);
+    gpio_set_dir(DRV8835_MODE, GPIO_OUT);
+    gpio_put(DRV8835_MODE, true);
 
     // Left Motor Driver
-    gpio_init(LEFT_MOTOR_IN1);
-    gpio_set_dir(LEFT_MOTOR_IN1, GPIO_OUT);
-    gpio_init(LEFT_MOTOR_IN2);
-    gpio_set_dir(LEFT_MOTOR_IN2, GPIO_OUT);
+    gpio_init(LEFT_MOTOR_PHASE);
+    gpio_set_dir(LEFT_MOTOR_PHASE, GPIO_OUT);
 
     gpio_set_function(LEFT_MOTOR_PWM, GPIO_FUNC_PWM);
     uint16_t slice_num = pwm_gpio_to_slice_num(LEFT_MOTOR_PWM);
@@ -251,10 +382,8 @@ int main()
     pwm_set_wrap(slice_num, pwm_wrap_);
 
     // Right Motor Driver
-    gpio_init(RIGHT_MOTOR_IN1);
-    gpio_set_dir(RIGHT_MOTOR_IN1, GPIO_OUT);
-    gpio_init(RIGHT_MOTOR_IN2);
-    gpio_set_dir(RIGHT_MOTOR_IN2, GPIO_OUT);
+    gpio_init(RIGHT_MOTOR_PHASE);
+    gpio_set_dir(RIGHT_MOTOR_PHASE, GPIO_OUT);
 
     gpio_set_function(RIGHT_MOTOR_PWM, GPIO_FUNC_PWM);
     uint16_t slice_num_right = pwm_gpio_to_slice_num(RIGHT_MOTOR_PWM);
@@ -268,8 +397,8 @@ int main()
     init_systick();
 
     // Init RC input reader
-    uint pin_list[2] = {RC_CH1_PIN, RC_CH2_PIN};
-    initialize_RC_PIO(pin_list, 2);
+    uint pinList[3] = {RC_CH1_PIN, RC_CH2_PIN, RC_CH3_PIN};
+    initialize_rc_PIO(pinList, 3);
 
     // Setup the control loop
     struct repeating_timer timer;
@@ -278,15 +407,18 @@ int main()
     int16_t acceleration[3], gyro[3], temp;
     while (true)
     {
-        sleep_ms(1);
-        // mpu6050_read_raw(acceleration, gyro, &temp);
-        printf("%.8f \t %.8f \t %d \t %d \t %d \t %d  \t %d \t %d  \n", rc_pulseWidth_ch1, rc_pulseWidth_ch2,
-               mixedLeft_, mixedRight_, leftMotorTargetSpeed_, rightMotorTargetSpeed_, leftPwmLevel_, rightPwmLevel_);
-        // // ACC X Y Z
-        // printf("%d \t %d \t %d \t", acceleration[0], acceleration[1], acceleration[2]);
+        if (isMpuPresent_)
+        {
+            mpu6050_read_raw(acceleration, gyro, &temp);
+        }
 
-        // // GYRO X Y Z
-        // printf("%d \t %d \t %d \t", gyro[0], gyro[1], gyro[2]);
+        printf("%.8f \t %.8f \t %d \t %d\n", rcPulseWidthCH1, rcPulseWidthCH2, leftMotorTargetSpeed_,
+               rightMotorTargetSpeed_);
+        // // ACC X Y Z
+        // printf("%d \t%d \t%d\t", acceleration[0], acceleration[1], acceleration[2]);
+
+        // // // GYRO X Y Z
+        // printf("%d \t%d \t%d\n", gyro[0], gyro[1], gyro[2]);
 
         // // Temperature is simple so use the datasheet calculation to get deg C.
         // // Note this is chip temperature.
@@ -296,76 +428,59 @@ int main()
     }
 }
 
-void setSpeedLeft(uint8_t dutyCycle)
+/* Sets the pwm level on a specific pwm channel but does not output it, to allow for syncing of multiple channels
+ */
+void set_pwm(uint8_t dutyCycle, uint8_t pwmPin)
 {
     currentMotorSpeedLeft_ = dutyCycle;  // TODO: update speed from encoder read values
 
-    uint16_t slice_num = pwm_gpio_to_slice_num(LEFT_MOTOR_PWM);
-    uint16_t duty = dutyCycle;                       // duty cycle, in percent
-    leftPwmLevel_ = (pwm_wrap_ - 1u) * duty / 100u;  // calculate channel level from given duty cycle in %
-    pwm_set_chan_level(slice_num, pwm_gpio_to_channel(LEFT_MOTOR_PWM), leftPwmLevel_);
-    pwm_set_enabled(slice_num, true);
+    uint16_t sliceNumber = pwm_gpio_to_slice_num(pwmPin);
+    uint16_t duty = dutyCycle;                           // duty cycle, in percent
+    uint16_t pwmLevel = (pwm_wrap_ - 1u) * duty / 100u;  // calculate channel level from given duty cycle in %
+    pwm_set_chan_level(sliceNumber, pwm_gpio_to_channel(pwmPin), pwmLevel);
 }
 
-void setSpeedRight(uint8_t dutyCycle)
-{
-    currentMotorSpeedRight_ = dutyCycle;  // TODO: update speed from encoder read values
-
-    uint16_t slice_num = pwm_gpio_to_slice_num(RIGHT_MOTOR_PWM);
-    uint16_t duty = dutyCycle;                        // duty cycle, in percent
-    rightPwmLevel_ = (pwm_wrap_ - 1u) * duty / 100u;  // calculate channel level from given duty cycle in %
-    pwm_set_chan_level(slice_num, pwm_gpio_to_channel(RIGHT_MOTOR_PWM), rightPwmLevel_);
-    pwm_set_enabled(slice_num, true);
-}
-
-void setDirectionLeft(Direction motorDirection)
+void set_direction_left(Direction motorDirection)
 {
     currentMotorDirectionLeft_ = motorDirection;
     switch (motorDirection)
     {
         case FORWARD:
         {
-            gpio_put(LEFT_MOTOR_IN1, true);
-            gpio_put(LEFT_MOTOR_IN2, false);
+            gpio_put(LEFT_MOTOR_PHASE, false);
             break;
         }
         case BACKWARD:
         {
-            gpio_put(LEFT_MOTOR_IN1, false);
-            gpio_put(LEFT_MOTOR_IN2, true);
+            gpio_put(LEFT_MOTOR_PHASE, true);
             break;
         }
         default:
         {
-            // Left
-            gpio_put(LEFT_MOTOR_IN1, true);
-            gpio_put(LEFT_MOTOR_IN2, false);
+            gpio_put(LEFT_MOTOR_PHASE, false);
         }
     }
 }
 
-void setDirectionRight(Direction motorDirection)
+void set_direction_right(Direction motorDirection)
 {
     currentMotorDirectionLeft_ = motorDirection;
     switch (motorDirection)
     {
         case FORWARD:
         {
-            gpio_put(RIGHT_MOTOR_IN1, true);
-            gpio_put(RIGHT_MOTOR_IN2, false);
+            gpio_put(RIGHT_MOTOR_PHASE, false);
             break;
         }
         case BACKWARD:
         {
-            gpio_put(RIGHT_MOTOR_IN1, false);
-            gpio_put(RIGHT_MOTOR_IN2, true);
+            gpio_put(RIGHT_MOTOR_PHASE, true);
             break;
         }
         default:
         {
             // Left
-            gpio_put(RIGHT_MOTOR_IN1, true);
-            gpio_put(RIGHT_MOTOR_IN2, false);
+            gpio_put(RIGHT_MOTOR_PHASE, false);
         }
     }
 }
@@ -374,16 +489,14 @@ void setDirectionRight(Direction motorDirection)
 float rc_readCh1(void)
 {
     // Convert from clock cycle to ms
-    rc_period_ch1 = 2 * period[0] * 0.000008f;
+    rcPeriodCH1 = 2 * period[0] * 0.000008f;
 
     // Check if the rc sender is on
     if (pulsewidth[0] > 0)
     {
         // one clock cycle is 1/125000 ms
-        rc_pulseWidth_ch1 = 2.0f * ((floorf((2.0f * (float)pulsewidth[0] * 0.000008f) * 100.0f) / 100.0f) - 1.5f);
+        rcPulseWidthCH1 = 2.0f * ((floorf((2.0f * (float)pulsewidth[0] * 0.000008f) * 100.0f) / 100.0f) - 1.5f);
     }
-    // read_dutycycle (between 0 and 1)
-    rc_dutyCycle_ch1 = roundf(((float)pulsewidth[0] / (float)period[0]) * 100.0f) / 100.0f - 0.12f;
 
     return 0;
 }
@@ -391,18 +504,41 @@ float rc_readCh1(void)
 float rc_readCh2(void)
 {
     // Convert from clock cycle to ms
-    rc_period_ch2 = 2 * period[1] * 0.000008;
+    rcPeriodCH2 = 2 * period[1] * 0.000008;
 
     // Check if the rc sender is on
-    if (pulsewidth[0] > 0)
+    if (pulsewidth[1] > 0)
     {
         // one clock cycle is 1/125000 ms
-        rc_pulseWidth_ch2 = 2.0f * ((floorf((2.0f * (float)pulsewidth[1] * 0.000008f) * 100.0f) / 100.0f) - 1.5f);
+        rcPulseWidthCH2 = 2.0f * ((floorf((2.0f * (float)pulsewidth[1] * 0.000008f) * 100.0f) / 100.0f) - 1.5f);
     }
 
-    // read_dutycycle (between 0 and 1)
-    rc_dutyCycle_ch2 = roundf(((float)pulsewidth[1] / (float)period[1]) * 100.0f) / 100.0f - 0.12f;
+    return 0;
+}
 
+float rc_readCh3(void)
+{
+    // Convert from clock cycle to ms
+    static float lastLevel = 0.0f;
+    float ch3 = 2 * period[2] * 0.000008;
+
+    // Check if the rc sender is on
+    if (pulsewidth[2] > 0)
+    {
+        // one clock cycle is 1/125000 ms
+        ch3 = (floorf((2.0f * (float)pulsewidth[2] * 0.000008f) * 100.0f) / 100.0f);
+    }
+
+    // Detect level change that signals a button press
+    if (fabs(lastLevel - ch3) > FLT_EPSILON * FLT_MIN)
+    {
+        mixStrategy_++;
+        if (mixStrategy_ >= LAST)
+        {
+            mixStrategy_ = NONE;
+        }
+    }
+    lastLevel = ch3;
     return 0;
 }
 
@@ -420,7 +556,7 @@ void init_systick()
     systick_hw->csr = 0x7;      // Enable Systic, Enable Exceptions
 }
 
-void initialize_RC_PIO(uint* pin_list, uint num_of_pins)
+void initialize_rc_PIO(uint* pin_list, uint num_of_pins)
 {
     // pio 0 is used
     rcPio_ = pio0;
@@ -463,8 +599,6 @@ void init_mpu_i2c()
     i2c_init(mpu_i2c_, 400 * 1000);
     gpio_set_function(MPU6050_SDA, GPIO_FUNC_I2C);
     gpio_set_function(MPU6050_SCL, GPIO_FUNC_I2C);
-    // gpio_pull_up(MPU6050_SDA);
-    // gpio_pull_up(MPU6050_SCL);
 
     mpu6050_reset();
 }
@@ -472,8 +606,13 @@ void mpu6050_reset()
 {
     // Two byte reset. First byte register, second byte data
     // There are a load more options to set up the device in different ways that could be added here
-    uint8_t buf[] = {0x6B, 0x80};
-    i2c_write_blocking(mpu_i2c_, mpu_addr_, buf, 2, false);
+    uint8_t buf[] = {0x6B, 0x00};
+    int res = i2c_write_blocking(mpu_i2c_, mpu_addr_, buf, 2, false);
+    if (res == PICO_ERROR_GENERIC)
+    {
+        isMpuPresent_ = false;
+        printf("No MPU Present!\n");
+    }
 }
 
 void mpu6050_read_raw(int16_t accel[3], int16_t gyro[3], int16_t* temp)
@@ -487,10 +626,7 @@ void mpu6050_read_raw(int16_t accel[3], int16_t gyro[3], int16_t* temp)
     // Start reading acceleration registers from register 0x3B for 6 bytes
     uint8_t val = 0x3B;
     int res = i2c_write_blocking(mpu_i2c_, mpu_addr_, &val, 1, true);  // true to keep master control of bus
-    if (res == PICO_ERROR_GENERIC)
-    {
-        printf("No MPU Present!\n");
-    }
+
     res = i2c_read_blocking(mpu_i2c_, mpu_addr_, buffer, 6, false);
 
     for (int i = 0; i < 3; i++)
