@@ -18,36 +18,6 @@
             "serverArgs": [
                 "-nogui",
             ],
-        },
-        {
-            "name": "RTT_Console",
-            "cwd": "${workspaceFolder}",
-            "type": "cortex-debug",
-            "request": "launch",
-            "servertype": "jlink",
-            "device": "RP2040_M0_0",
-            "BMPGDBSerialPort": "/dev/ttyACM0",
-            "interface": "swd",
-            "executable": "build/out/hrh_bot.elf",
-            "serverpath": "/opt/SEGGER/JLink_V786g/JLinkGDBServerCLExe",
-            "armToolchainPath": "/opt/toolchain/arm-gnu-toolchain-12.2.rel1-x86_64-arm-none-eabi/bin",
-            "svdFile": "/opt/toolchain/pico/pico-sdk/src/rp2040/hardware_regs/rp2040.svd",
-            "runToEntryPoint": "main",
-            "serverArgs": [
-                "-nogui",
-                
-            ],
-            "rttConfig": {
-                "enabled": true,
-                "address": "auto",
-                "decoders": [
-                    {
-                        "port": 0,
-                        "timestamp": true,
-                        "type": "console"
-                    },
-                ],
-            },
-        },
+        }
     ]
 }
