@@ -2,8 +2,6 @@
 #include <math.h>
 #include <stdio.h>
 #include "PwmIn.pio.h"
-#include "SEGGER_RTT.h"
-#include "SEGGER_SYSVIEW.h"
 #include "hardware/clocks.h"
 #include "hardware/i2c.h"
 #include "hardware/irq.h"
@@ -11,7 +9,6 @@
 #include "hardware/pwm.h"
 #include "hardware/structs/systick.h"
 #include "pico/stdlib.h"
-#include "quadrature.pio.h"
 
 /***********************************
  * Board Config
@@ -21,17 +18,11 @@
 
 #define RC_CH1_PIN 0
 #define RC_CH2_PIN 1
-#define RC_CH3_PIN 2
 #define RIGHT_MOTOR_PWM 3
 #define RIGHT_MOTOR_PHASE 4
 #define LEFT_MOTOR_PWM 5
 #define LEFT_MOTOR_PHASE 6
 #define DRV8835_MODE 7
-
-#define MPU6050_I2C 1
-#define MPU6050_SDA 10
-#define MPU6050_SCL 11
-#define MPU6050_INT_PIN 12
 
 /***********************************
  * Static Vars
@@ -45,28 +36,13 @@ uint16_t pwm_wrap_ = 12500u;
 uint8_t pwm_clk_div_ = 1u;
 uint8_t pwmDeadzone_ = 7;
 
-// MPU Vars
-bool isMpuPresent_ = true;
-i2c_inst_t* mpu_i2c_;
-uint8_t mpu_addr_ = 0x68;  // 0x68;
-float offsetAccX = -0.03f;
-float offsetAccY = -0.3f;
-float offsetGyroX = 3.78f;
-float offsetGyroY = 3.81f;
-float offsetGyroZ = 3.81f;
-float acceleration[3] = {0.0f};
-float gyro[3] = {0.0f};
-
-#define MPU_ACC_SCALE 16384.0f
-#define MPU_GYRO_SCALE 131.0f
-
 // RC Var
 PIO rcPio_;
 uint rcsm_ = 0u;
-float rcPeriodCH1 = 0.0f;      // in ms
-float rcPulseWidthCH1 = 0.0f;  // in ms
-float rcPeriodCH2 = 0.0f;      // in ms
-float rcPulseWidthCH2 = 0.0f;  // in ms
+float rcPeriodCH1 = 0.0f;
+float rcPulseWidthCH1 = 0.0f;
+float rcPeriodCH2 = 0.0f;
+float rcPulseWidthCH2 = 0.0f;
 static uint32_t pulsewidth[4], period[4];
 
 // Motor Vars
@@ -83,7 +59,6 @@ typedef enum MixStrategy
     NEG_EXPONENTIAL,
     LAST
 } MixStrategy;
-bool isFlipped_ = false;
 uint8_t currentMotorSpeedLeft_ = 0u;   // pwm
 uint8_t currentMotorSpeedRight_ = 0u;  // pwm
 Direction currentMotorDirectionLeft_ = FORWARD;
@@ -101,44 +76,14 @@ void set_direction_left(Direction motorDirection);
 void set_direction_right(Direction motorDirection);
 float rc_readCh1(void);
 float rc_readCh2(void);
-float rc_readCh3(void);
 void initialize_rc_PIO(uint* pin_list, uint num_of_pins);
-void init_mpu_i2c();
-void mpu6050_reset();
-void mpu6050_read_raw(int16_t accel[3], int16_t gyro[3], int16_t* temperature);
-void calculate_imu_error();
-void calculateAcceleration(int16_t rawSensorValues[3], float acceleration[3]);  // Calculate the values in m/s^2
-void calculateGyro(int16_t rawSensorValues[3], float gyro[3]);                  // Calculate °/s
+void initializeBoard();
 
 // 1ms Systick irq. Used to update the static vars for the rc channel data
 extern void isr_systick()
 {
-    SEGGER_SYSVIEW_RecordEnterISR();
     rc_readCh1();
     rc_readCh2();
-    rc_readCh3();
-    SEGGER_SYSVIEW_RecordExitISR();
-}
-
-// set the pio rc receiver irq handler
-void pio_irq_handler()
-{
-    int state_machine = -1;
-    // check which IRQ was raised:
-    for (int i = 0; i < 4; i++)
-    {
-        if (pio0_hw->irq & 1 << i)
-        {
-            // clear interrupt
-            pio0_hw->irq = 1 << i;
-            // read pulse width from the FIFO
-            pulsewidth[i] = pio_sm_get(rcPio_, i);
-            // read low period from the FIFO
-            period[i] = pio_sm_get(rcPio_, i);
-            // clear interrupt
-            pio0_hw->irq = 1 << i;
-        }
-    }
 }
 
 // 1ms control loop
@@ -274,22 +219,14 @@ bool controlLoop(struct repeating_timer* t)
             float y = pow(x_normed, a) * 100.0f;
 
             int8_t mix = abs(ch2Normed) - abs((int)y);
+            float scaleMixOutput = 0.25f;
 
             // Right Turn
             if (ch1Normed < 0)
             {
-                // Driving right
                 if (mix < 0)  // underflow check
                 {
                     mixedLeft_ = 0;
-                    if (ch2Normed < 80)
-                    {
-                        mixedRight_ += abs((int)0.25f * y);
-                    }
-                    else
-                    {
-                        mixedLeft_ = 20;
-                    }
                 }
                 else
                 {
@@ -300,18 +237,9 @@ bool controlLoop(struct repeating_timer* t)
             // Left Turn
             if (ch1Normed > 0)
             {
-                // Driving right
                 if (mix < 0)  // underflow check
                 {
                     mixedRight_ = 0;
-                    if (ch2Normed < 80)
-                    {
-                        mixedLeft_ += abs((int)0.25f * y);
-                    }
-                    else
-                    {
-                        mixedRight_ = 20;
-                    }
                 }
                 else
                 {
@@ -354,7 +282,7 @@ bool controlLoop(struct repeating_timer* t)
         }
     }
 
-    // Max & Min
+    // Check Max & Min
     if (leftMotorTargetSpeed_ > 100u)
     {
         leftMotorTargetSpeed_ = 100u;
@@ -387,15 +315,21 @@ int main()
     static char r;
     stdio_init_all();
 
-    SEGGER_SYSVIEW_Conf();
-    SEGGER_SYSVIEW_OnIdle();
+    initializeBoard();
 
-    SEGGER_RTT_ConfigUpBuffer(0, NULL, NULL, 0, SEGGER_RTT_MODE_BLOCK_IF_FIFO_FULL);
+    // Setup the control loop
+    struct repeating_timer timer;
+    add_repeating_timer_ms(1, controlLoop, NULL, &timer);
 
-    SEGGER_RTT_WriteString(0, "SEGGER Real-Time-Terminal Sample\r\n\r\n");
+    while (true)
+    {
+        printf("%.8f \t %.8f \t %d \t %d\n", rcPulseWidthCH1, rcPulseWidthCH2, leftMotorTargetSpeed_,
+               rightMotorTargetSpeed_);
+    }
+}
 
-    // IMU MPU6050
-    init_mpu_i2c();
+void initializeBoard()
+{
     gpio_init(DRV8835_MODE);
     gpio_set_dir(DRV8835_MODE, GPIO_OUT);
     gpio_put(DRV8835_MODE, true);
@@ -429,35 +363,8 @@ int main()
     init_systick();
 
     // Init RC input reader
-    uint pinList[3] = {RC_CH1_PIN, RC_CH2_PIN, RC_CH3_PIN};
-    initialize_rc_PIO(pinList, 3);
-
-    // Setup the control loop
-    struct repeating_timer timer;
-    add_repeating_timer_ms(1, controlLoop, NULL, &timer);
-
-    int16_t acceleration[3], gyro[3], temp;
-    while (true)
-    {
-        if (isMpuPresent_)
-        {
-            mpu6050_read_raw(acceleration, gyro, &temp);
-        }
-
-        printf("%.8f \t %.8f \t %d \t %d\n", rcPulseWidthCH1, rcPulseWidthCH2, leftMotorTargetSpeed_,
-               rightMotorTargetSpeed_);
-        // // ACC X Y Z
-        // printf("%d \t%d \t%d\t", acceleration[0], acceleration[1], acceleration[2]);
-
-        // // // GYRO X Y Z
-        // printf("%d \t%d \t%d\n", gyro[0], gyro[1], gyro[2]);
-
-        // // Temperature is simple so use the datasheet calculation to get deg C.
-        // // Note this is chip temperature.
-
-        // // Temp
-        // printf("%f\n", (temp / 340.0) + 36.53);
-    }
+    uint pinList[3] = {RC_CH1_PIN, RC_CH2_PIN};
+    initialize_rc_PIO(pinList, 2);
 }
 
 /* Sets the pwm level on a specific pwm channel but does not output it, to allow for syncing of multiple channels
@@ -533,6 +440,7 @@ float rc_readCh1(void)
     return 0;
 }
 
+// read the period and pulsewidth
 float rc_readCh2(void)
 {
     // Convert from clock cycle to ms
@@ -548,44 +456,33 @@ float rc_readCh2(void)
     return 0;
 }
 
-float rc_readCh3(void)
-{
-    // Convert from clock cycle to ms
-    static float lastLevel = 0.0f;
-    float ch3 = 2 * period[2] * 0.000008;
-
-    // Check if the rc sender is on
-    if (pulsewidth[2] > 0)
-    {
-        // one clock cycle is 1/125000 ms
-        ch3 = (floorf((2.0f * (float)pulsewidth[2] * 0.000008f) * 100.0f) / 100.0f);
-    }
-
-    // Detect level change that signals a button press
-    if (fabs(lastLevel - ch3) > FLT_EPSILON * FLT_MIN)
-    {
-        mixStrategy_++;
-        if (mixStrategy_ >= LAST)
-        {
-            mixStrategy_ = NONE;
-        }
-    }
-    lastLevel = ch3;
-    return 0;
-}
-
-uint32_t SEGGER_SYSVIEW_X_GetTimestamp(void)
-{
-    uint32_t timeStamp = timer_hw->timerawl;
-    return timeStamp;
-}
-
 void init_systick()
 {
     systick_hw->csr = 0;        // Disable
     systick_hw->rvr = 124999U;  // Standard System clock (125Mhz)/ (rvr value + 1) = 1ms
     systick_hw->cvr = 0;        // clear the count to force initial reload
     systick_hw->csr = 0x7;      // Enable Systic, Enable Exceptions
+}
+
+// set the pio rc receiver irq handler
+void pio_irq_handler()
+{
+    int state_machine = -1;
+    // check which IRQ was raised:
+    for (int i = 0; i < 4; i++)
+    {
+        if (pio0_hw->irq & 1 << i)
+        {
+            // clear interrupt
+            pio0_hw->irq = 1 << i;
+            // read pulse width from the FIFO
+            pulsewidth[i] = pio_sm_get(rcPio_, i);
+            // read low period from the FIFO
+            period[i] = pio_sm_get(rcPio_, i);
+            // clear interrupt
+            pio0_hw->irq = 1 << i;
+        }
+    }
 }
 
 void initialize_rc_PIO(uint* pin_list, uint num_of_pins)
@@ -624,127 +521,3 @@ void initialize_rc_PIO(uint* pin_list, uint num_of_pins)
     // allow irqs from the low 4 state machines
     pio0_hw->inte0 = PIO_IRQ0_INTE_SM0_BITS | PIO_IRQ0_INTE_SM1_BITS | PIO_IRQ0_INTE_SM2_BITS | PIO_IRQ0_INTE_SM3_BITS;
 };
-
-void init_mpu_i2c()
-{
-    mpu_i2c_ = i2c1;
-    i2c_init(mpu_i2c_, 400 * 1000);
-    gpio_set_function(MPU6050_SDA, GPIO_FUNC_I2C);
-    gpio_set_function(MPU6050_SCL, GPIO_FUNC_I2C);
-
-    mpu6050_reset();
-    calculate_imu_error();
-}
-void mpu6050_reset()
-{
-    // Two byte reset. First byte register, second byte data
-    // There are a load more options to set up the device in different ways that could be added here
-    uint8_t buf[] = {0x6B, 0x00};
-    int res = i2c_write_blocking(mpu_i2c_, mpu_addr_, buf, 2, false);
-    if (res == PICO_ERROR_GENERIC)
-    {
-        isMpuPresent_ = false;
-        printf("No MPU Present!\n");
-    }
-}
-
-void mpu6050_read_raw(int16_t accel[3], int16_t gyro[3], int16_t* temperature)
-{
-    // For this particular device, we send the device the register we want to read
-    // first, then subsequently read from the device. The register is auto incrementing
-    // so we don't need to keep sending the register we want, just the first.
-
-    uint8_t buffer[6];
-
-    // Start reading acceleration registers from register 0x3B for 6 bytes
-    uint8_t val = 0x3B;
-    int res = i2c_write_blocking(mpu_i2c_, mpu_addr_, &val, 1, true);  // true to keep master control of bus
-
-    res = i2c_read_blocking(mpu_i2c_, mpu_addr_, buffer, 6, false);
-
-    for (int i = 0; i < 3; i++)
-    {
-        accel[i] = (buffer[i * 2] << 8 | buffer[(i * 2) + 1]);
-    }
-
-    // Now gyro data from reg 0x43 for 6 bytes
-    // The register is auto incrementing on each read
-    val = 0x43;
-    res = i2c_write_blocking(mpu_i2c_, mpu_addr_, &val, 1, true);
-    res = i2c_read_blocking(mpu_i2c_, mpu_addr_, buffer, 6, false);  // False - finished with bus
-
-    for (int i = 0; i < 3; i++)
-    {
-        gyro[i] = (buffer[i * 2] << 8 | buffer[(i * 2) + 1]);
-    }
-
-    // Now temperature from reg 0x41 for 2 bytes
-    // The register is auto incrementing on each read
-    val = 0x41;
-    res = i2c_write_blocking(mpu_i2c_, mpu_addr_, &val, 1, true);
-    res = i2c_read_blocking(mpu_i2c_, mpu_addr_, buffer, 2, false);  // False - finished with bus
-
-    *temperature = buffer[0] << 8 | buffer[1];
-}
-
-void calculate_imu_error()
-{
-    float accel[3];
-    float gyro[3];
-    float accErrorX = 0.0f;
-    float accErrorY = 0.0f;
-    float gyroErrorX = 0.0f;
-    float gyroErrorY = 0.0f;
-    float gyroErrorZ = 0.0f;
-    int counter = 0;
-    uint8_t buffer[6];
-    while (counter < 200)
-    {
-        // Start reading acceleration registers from register 0x3B for 6 bytes
-        uint8_t val = 0x3B;
-        i2c_write_blocking(mpu_i2c_, mpu_addr_, &val, 1, true);  // true to keep master control of bus
-        i2c_read_blocking(mpu_i2c_, mpu_addr_, buffer, 6, false);
-
-        for (int i = 0; i < 3; i++)
-        {
-            accel[i] = (buffer[i * 2] << 8 | buffer[(i * 2) + 1]) / MPU_ACC_SCALE;
-        }
-        // Sum all readings
-        accErrorX = accErrorY + ((atan((accel[1]) / sqrt(pow((accel[0]), 2) + pow((accel[2]), 2))) * 180 / M_PI));
-        accErrorY = accErrorY + ((atan(-1 * (accel[0]) / sqrt(pow((accel[1]), 2) + pow((accel[2]), 2))) * 180 / M_PI));
-        counter++;
-    }
-
-    // Divide the sum by 200 to get the error value
-    accErrorX = accErrorX / 200.0f;
-    accErrorY = accErrorY / 200.0f;
-    counter = 0;
-    // Read gyro values 200 times
-    while (counter < 200)
-    {
-        uint8_t val = 0x43;
-        i2c_write_blocking(mpu_i2c_, mpu_addr_, &val, 1, true);  // true to keep master control of bus
-        i2c_read_blocking(mpu_i2c_, mpu_addr_, buffer, 6, false);
-        for (int i = 0; i < 3; i++)
-        {
-            gyro[i] = (buffer[i * 2] << 8 | buffer[(i * 2) + 1]) / MPU_GYRO_SCALE;
-        }
-        // Sum all readings
-        gyroErrorX = gyroErrorX + (gyro[0] / 131.0);
-        gyroErrorY = gyroErrorY + (gyro[1] / 131.0);
-        gyroErrorZ = gyroErrorZ + (gyro[2] / 131.0);
-        counter++;
-    }
-    // Divide the sum by 200 to get the error value
-    gyroErrorX = gyroErrorX / 200;
-    gyroErrorY = gyroErrorY / 200;
-    gyroErrorZ = gyroErrorZ / 200;
-    char msg[80];
-    sprintf(msg, "e_accX: %f, e_accY: %f, e_gyroX: %f, e_gyroY: %f, e_gyroZ: %f\n", accErrorX, accErrorY, gyroErrorX,
-            gyroErrorY, gyroErrorZ);
-    SEGGER_RTT_WriteString(0, msg);
-}
-
-void calculateAcceleration(int16_t rawSensorValues[3], float acceleration[3]) {}
-
-void calculateGyro(int16_t rawSensorValues[3], float gyro[3]) {}

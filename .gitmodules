@@ -1,6 +1,3 @@
 [submodule "libs/platforms"]
 	path = libs/platforms
 	url = ../platforms.git
-[submodule "libs/segger"]
-	path = libs/segger
-	url = ../segger.git
